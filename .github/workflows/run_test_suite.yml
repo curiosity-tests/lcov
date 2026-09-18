@@ -21,7 +21,7 @@ on:
   pull_request:
   push:
   schedule:
-    - cron: '0 14 * * 5'  # Every Friday 2pm
+  - cron: '0 14 * * 5'    # Every Friday 2pm
   workflow_dispatch:
     inputs:
       leg:
@@ -58,124 +58,195 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runs-on: ubuntu-24.04
-            gcc: 9
-            install: g++-9 gcc-9 cpp-9
-          - runs-on: ubuntu-24.04
-            gcc: 10
-            install: g++-10 gcc-10 cpp-10
+        - runs-on: ubuntu-24.04
+          gcc: 9
+          install: g++-9 gcc-9 cpp-9
+        - runs-on: ubuntu-24.04
+          gcc: 10
+          install: g++-10 gcc-10 cpp-10
           # GCC 10 to 14 are assumed to behave "the same",
           # so we are skipping GCC 11, 12, 13 here to save CI resources
-          - runs-on: ubuntu-24.04
-            gcc: 14
-            install:
-          - runs-on: ubuntu-24.04
-            gcc: 16
-            install: binutils g++-16 gcc-16 cpp-16
+        - runs-on: ubuntu-24.04
+          gcc: 14
+          install:
+        - runs-on: ubuntu-24.04
+          gcc: 16
+          install: binutils g++-16 gcc-16 cpp-16
     steps:
-      - name: Checkout code
-        uses: crashappsec/action-checkout@e9ff46a65f6403d9d88b87d248c3dfa41550ec75
-        with:
-          chalk: ${{ env.CHALK_ON }}
-          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
-          observables_continue_on_error: false
-          lfs: false
-      - name: Assert instrumentation is live
-        if: env.CHALK_ON == 'true'
-        run: |
-          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
-          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+    - name: Checkout code
+      uses: crashappsec/action-checkout@e9ff46a65f6403d9d88b87d248c3dfa41550ec75
+      with:
+        chalk: ${{ env.CHALK_ON }}
+        profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+        observables_continue_on_error: false
+        lfs: false
+    - name: Install dependencies
+      run: |-
+        ubuntu_packages=(
+          # Perl runtime dependencies as documented in README
+          libcapture-tiny-perl       # CPAN Capture::Tiny
+          libdatetime-perl           # CPAN DateTime
+          libdevel-cover-perl        # CPAN Devel::Cover
+          libdigest-md5-file-perl    # CPAN Digest::MD5
+          libfile-spec-native-perl   # CPAN File::Spec
+          libjson-xs-perl            # CPAN JSON::XS
+                                     # CPAN Memory::Process, see below
+                                     # CPAN Module::Load::Conditional
+          libscalar-list-utils-perl  # CPAN Scalar::Util
+                                     # CPAN Time::HiRes
+          libtimedate-perl           # CPAN TimeDate
 
-      - name: Install dependencies
-        run: |-
-          ubuntu_packages=(
-            # Perl runtime dependencies as documented in README
-            libcapture-tiny-perl       # CPAN Capture::Tiny
-            libdatetime-perl           # CPAN DateTime
-            libdevel-cover-perl        # CPAN Devel::Cover
-            libdigest-md5-file-perl    # CPAN Digest::MD5
-            libfile-spec-native-perl   # CPAN File::Spec
-            libjson-xs-perl            # CPAN JSON::XS
-                                       # CPAN Memory::Process, see below
-                                       # CPAN Module::Load::Conditional
-            libscalar-list-utils-perl  # CPAN Scalar::Util
-                                       # CPAN Time::HiRes
-            libtimedate-perl           # CPAN TimeDate
+          # Non-Perl runtime dependencies as documented in README
+          llvm                       # for command "llvm-profdata"
+          python3-coverage           # PyPI coverage
+          python3-xlsxwriter         # PyPI xlsxwriter
+          python3-sphinx             # doc build
+          python3-sphinx-rtd-theme   # doc build
 
-            # Non-Perl runtime dependencies as documented in README
-            llvm                       # for command "llvm-profdata"
-            python3-coverage           # PyPI coverage
-            python3-xlsxwriter         # PyPI xlsxwriter
-            python3-sphinx             # doc build
-            python3-sphinx-rtd-theme   # doc build
+          # Additional dependencies for "make check"
+          libgd-perl                 # CPAN GD
+        )
+        set -x
 
-            # Additional dependencies for "make check"
-            libgd-perl                 # CPAN GD
-          )
-          set -x
+        sudo apt-get update
+        sudo apt-get install --no-install-recommends --yes -V "${ubuntu_packages[@]}"
 
+        sudo perl -MCPAN -e 'install(Memory::Process)'  # no package in Ubuntu
+
+    - name: Add repository "resolute" for GCC 16
+      if: "${{ matrix.gcc == '16' }}"
+      run: |
+        set -x
+        # NOTE: resolute is future 26.04 (not 24.04 LTS)
+        sudo add-apt-repository 'deb https://archive.ubuntu.com/ubuntu/ resolute main universe'
+
+    - name: "Make GCC ${{ matrix.gcc }} systemwide default"
+      run: |-
+        set -x -o pipefail
+        if [[ "${{ matrix.install }}" != "" ]]; then
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes -V "${ubuntu_packages[@]}"
+          sudo apt-get install --no-install-recommends --yes -V ${{ matrix.install }}
+        fi
 
-          sudo perl -MCPAN -e 'install(Memory::Process)'  # no package in Ubuntu
+        # Make requested version GCC and GCOV the system default
+        # before we have an easy way to fully divert "make check"
+        # off of the default commands
+        for i in cpp {,x86_64-linux-gnu-}{g++,gcc{,-{ar,nm,ranlib}},gcov{,-{dump,tool}},gfortran} lto-dump ; do
+          [[ -e /usr/bin/"${i}" ]] || continue
+          [[ -e /usr/bin/"${i}-${{ matrix.gcc }}" ]] || continue
+          sudo rm /usr/bin/"${i}"
+          sudo ln -s "${i}-${{ matrix.gcc }}" /usr/bin/"${i}"
+          "${i}" --version | head -n1
+        done
 
-      - name: Add repository "resolute" for GCC 16
-        if: "${{ matrix.gcc == '16' }}"
-        run: |
-          set -x
-          # NOTE: resolute is future 26.04 (not 24.04 LTS)
-          sudo add-apt-repository 'deb https://archive.ubuntu.com/ubuntu/ resolute main universe'
+    - name: make install
+      run: |-
+        set -x -o pipefail
+        make install PREFIX=/usr CFG_DIR=/etc DESTDIR="${PWD}/ROOT"
+        find ROOT/ | sort | xargs -r ls -ld
 
-      - name: "Make GCC ${{ matrix.gcc }} systemwide default"
-        run: |-
-          set -x -o pipefail
-          if [[ "${{ matrix.install }}" != "" ]]; then
-            sudo apt-get update
-            sudo apt-get install --no-install-recommends --yes -V ${{ matrix.install }}
-          fi
+    - name: make uninstall
+      run: |-
+        set -x -o pipefail
+        make uninstall PREFIX=/usr CFG_DIR=/etc DESTDIR="${PWD}/ROOT"
+        find ROOT/ | sort | xargs -r ls -ld
+        diff -u0 <(echo 'total 0') <(ls -l ROOT/)  # i.e. fail CI if leftovers
 
-          # Make requested version GCC and GCOV the system default
-          # before we have an easy way to fully divert "make check"
-          # off of the default commands
-          for i in cpp {,x86_64-linux-gnu-}{g++,gcc{,-{ar,nm,ranlib}},gcov{,-{dump,tool}},gfortran} lto-dump ; do
-            [[ -e /usr/bin/"${i}" ]] || continue
-            [[ -e /usr/bin/"${i}-${{ matrix.gcc }}" ]] || continue
-            sudo rm /usr/bin/"${i}"
-            sudo ln -s "${i}-${{ matrix.gcc }}" /usr/bin/"${i}"
-            "${i}" --version | head -n1
-          done
+    - name: make check
+      run: |-
+        set -x -o pipefail
+        # use as many parallel threads as we have cores
+        make check PARALLEL=0
 
-      - name: make install
-        run: |-
-          set -x -o pipefail
-          make install PREFIX=/usr CFG_DIR=/etc DESTDIR="${PWD}/ROOT"
-          find ROOT/ | sort | xargs -r ls -ld
+    - name: Upload test log as an artifact
+      if: ${{ always() }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: "lcov-${{ github.sha }}-${{ runner.os }}-GCC-${{ matrix.gcc }}-test-log"    # .zip
+        path: tests/test.log
+        if-no-files-found: error
 
-      - name: make uninstall
-        run: |-
-          set -x -o pipefail
-          make uninstall PREFIX=/usr CFG_DIR=/etc DESTDIR="${PWD}/ROOT"
-          find ROOT/ | sort | xargs -r ls -ld
-          diff -u0 <(echo 'total 0') <(ls -l ROOT/)  # i.e. fail CI if leftovers
-
-      - name: make check
-        run: |-
-          set -x -o pipefail
-          # use as many parallel threads as we have cores
-          make check PARALLEL=0
-
-      - name: Upload test log as an artifact
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: "lcov-${{ github.sha }}-${{ runner.os }}-GCC-${{ matrix.gcc }}-test-log"  # .zip
-          path: tests/test.log
-          if-no-files-found: error
-
-      - name: Upload test directory shrapnel  as an artifact
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: "lcov-${{ github.sha }}-${{ runner.os }}-GCC-${{ matrix.gcc }}-shrapnel"  # .zip
-          path: tests
+    - name: Upload test directory shrapnel  as an artifact
+      if: ${{ always() }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: "lcov-${{ github.sha }}-${{ runner.os }}-GCC-${{ matrix.gcc }}-shrapnel"    # .zip
+        path: tests
           #if-no-files-found: error
+    - name: Check observables and crashes
+      if: always() && env.CHALK_ON == 'true'
+      shell: bash
+      run: |
+        set -uo pipefail
+        root="${CURIOSITY_ROOT:-}"
+        home="${CURIOSITY_HOME:-/mnt/curiosity}"
+        obs="${home}/observables"
+        fail=0
+
+        echo "::group::curiosity layout"
+        echo "CURIOSITY_ROOT=${root:-<unset>}"
+        echo "CURIOSITY_HOME=${home}"
+        ls -la "${obs}" 2>/dev/null || echo "no observables dir at ${obs}"
+        echo "::endgroup::"
+
+        # Observables for THIS run+attempt. The prefix matters: a stale file from an
+        # earlier run on the same mount would otherwise pass.
+        prefix="${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+        shopt -s nullglob
+        mine=("${obs}/${prefix}"*)
+        if [ ${#mine[@]} -eq 0 ]; then
+          mine=("${obs}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-observables"*)
+        fi
+        if [ ${#mine[@]} -eq 0 ]; then
+          echo "::error::no observables for run ${prefix} in ${obs} - instrumentation produced nothing"
+          fail=1
+        else
+          echo "observables present: ${#mine[@]} file(s)"
+          printf '  %s\n' "${mine[@]}"
+        fi
+
+        for f in "${mine[@]}"; do
+          case "$f" in
+            *.jsonl|*.json|*.combined)
+              if ! jq --slurp "." "$f" > /dev/null 2>&1; then
+                echo "::error::observables do not parse: $f"
+                fail=1
+              fi
+              ;;
+          esac
+        done
+
+        # Crash thresholds copied from check-run: a few null frames are noise, more than
+        # five is a stack walk into nothing.
+        for f in "${root}"/log/co-host*.log "${home}"/log/co-host*.log; do
+          [ -f "$f" ] || continue
+          echo "Asserting that there is no crash in $f"
+          if [ "$(grep -c 'p 00000000' "$f" 2>/dev/null || echo 0)" -gt 5 ] \
+            || [ "$(grep -E -c 'FATAL: Uncaught signal|Address not mapped at|RAX 0x.*RBX 0x' "$f" 2>/dev/null || echo 0)" -gt 1 ]; then
+            echo "::error::crash signature in $f"
+            grep -E 'FATAL: Uncaught signal|Address not mapped at' "$f" | head -5 || true
+            fail=1
+          fi
+        done
+
+        cores=("${root}"/coredump.* "${home}"/coredump.*)
+        if [ ${#cores[@]} -gt 0 ]; then
+          echo "::error::coredump present: ${cores[*]}"
+          fail=1
+        fi
+
+        for f in "${root}"/runc.log "${root}"/runc.global.log \
+                 "${home}"/runc.log "${home}"/runc.global.log; do
+          [ -f "$f" ] || continue
+          if grep -q '^E:' "$f"; then
+            echo "::error::error in $f"
+            grep '^E:' "$f" | head -5
+            fail=1
+          fi
+        done
+
+        if [ "$fail" -ne 0 ]; then
+          echo "::error::instrumentation check FAILED"
+          exit 1
+        fi
+        echo "instrumentation check passed"
